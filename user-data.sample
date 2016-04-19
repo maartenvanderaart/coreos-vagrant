@@ -1,43 +1,54 @@
 #cloud-config
 
+---
 coreos:
   etcd2:
-    #generate a new token for each unique cluster from https://discovery.etcd.io/new
-    #discovery: https://discovery.etcd.io/<token>
-    # multi-region and multi-cloud deployments need to use $public_ipv4
+    discovery: https://discovery.etcd.io/yadayadayada
     advertise-client-urls: http://$public_ipv4:2379
-    initial-advertise-peer-urls: http://$private_ipv4:2380
-    # listen on both the official ports and the legacy ports
-    # legacy ports can be omitted if your application doesn't depend on them
+    initial-advertise-peer-urls: http://$public_ipv4:2380
     listen-client-urls: http://0.0.0.0:2379,http://0.0.0.0:4001
-    listen-peer-urls: http://$private_ipv4:2380,http://$private_ipv4:7001
-  fleet:
-    public-ip: $public_ipv4
-  flannel:
-    interface: $public_ipv4
+    listen-peer-urls: http://$public_ipv4:2380,http://$public_ipv4:7001
   units:
-    - name: etcd2.service
-      command: start
-    - name: fleet.service
-      command: start
-    - name: flanneld.service
-      drop-ins:
-      - name: 50-network-config.conf
-        content: |
-          [Service]
-          ExecStartPre=/usr/bin/etcdctl set /coreos.com/network/config '{ "Network": "10.1.0.0/16" }'
-      command: start
-    - name: docker-tcp.socket
-      command: start
-      enable: true
+  - name: etcd2.service
+    command: start
+  - name: docker.service
+    drop-ins:
+    - name: custom.conf
       content: |
-        [Unit]
-        Description=Docker Socket for the API
+        [Service]
+        Environment="DOCKER_OPTS=-H=0.0.0.0:2376 -H unix:///var/run/docker.sock --cluster-advertise eth1:2376 --cluster-store etcd://127.0.0.1:2379"
+    command: start
+  - name: swarm-agent.service
+    enable: true
+    content: |
+      [Unit]
+      Description=Docker Swarm agent
+      After=docker.service
+      Requires=docker.service
 
-        [Socket]
-        ListenStream=2375
-        Service=docker.service
-        BindIPv6Only=both
+      [Service]
+      TimeoutStartSec=0
+      ExecStartPre=-/usr/bin/docker kill swarm-agent
+      ExecStartPre=-/usr/bin/docker rm swarm-agent
+      ExecStartPre=/usr/bin/docker pull swarm:latest
+      ExecStart=/usr/bin/docker run -d --name swarm-agent --net=host swarm:latest join --addr=$public_ipv4:2376 etcd://127.0.0.1:2379
 
-        [Install]
-        WantedBy=sockets.target
+      [Install]
+      WantedBy=multi-user.target
+  - name: swarm-manager.service
+    enable: true
+    content: |
+      [Unit]
+      Description=Docker Swarm manager
+      After=swarm-agent.service
+      Requires=swarm-agent.service
+
+      [Service]
+      TimeoutStartSec=0
+      ExecStartPre=-/usr/bin/docker kill swarm-manager
+      ExecStartPre=-/usr/bin/docker rm swarm-manager
+      ExecStartPre=/usr/bin/docker pull swarm:latest
+      ExecStart=/usr/bin/docker run -d --name swarm-manager --net=host swarm:latest manage etcd://127.0.0.1:2379
+
+      [Install]
+      WantedBy=multi-user.target
